@@ -7,6 +7,7 @@ using Ingos_API.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json.Linq;
+using Npgsql;
 
 namespace Ingos_API.Controllers
 {
@@ -32,15 +33,13 @@ namespace Ingos_API.Controllers
         {
             string cs = GetConnString();
 
-            using (var con = new SqlConnection(cs))
+            using (var con = new NpgsqlConnection(cs))
             {
                 con.Open();
 
-                string queryString = @"declare @result nvarchar(max);
-                                        set @result = (select * from technology for json auto);
-                                        select @result;";
+                string queryString = @"select json_agg(r1) from (select * from technology) r1;";
 
-                SqlCommand cmd = new SqlCommand(queryString, con);
+                var cmd = new NpgsqlCommand(queryString, con);
 
                 try
                 {
@@ -72,24 +71,13 @@ namespace Ingos_API.Controllers
             var name = (data["name"]).ToString();
             var description = (data["description"]).ToString();
 
-            using (var con = new SqlConnection(cs))
+            using (var con = new NpgsqlConnection(cs))
             {
                 con.Open();
 
-                string queryString = @"declare @message varchar(100);
+                string queryString = @"select addtechnology(@name, @description)";
 
-                                        if not exists(select * from technology where name = @name)
-                                            begin
-                                                insert technology (name, description) values (@name, @description);
-                                                select * from technology where name = @name for json auto;
-                                            end
-                                        else
-                                            begin
-                                                set @message = 'Technology with name ' + @name + ' already exists';
-                                                raiserror (@message, 16, 16);
-                                            end";
-
-                SqlCommand cmd = new SqlCommand(queryString, con);
+                var cmd = new NpgsqlCommand(queryString, con);
                 cmd.Parameters.AddWithValue("name", name);
                 cmd.Parameters.AddWithValue("description", description);
 

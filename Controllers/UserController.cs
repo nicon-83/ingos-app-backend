@@ -8,6 +8,7 @@ using Ingos_API.Models;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json.Linq;
+using Npgsql;
 
 namespace Ingos_API.Controllers
 {
@@ -29,33 +30,33 @@ namespace Ingos_API.Controllers
         // GET api/user
         [Route("api/[controller]")]
         [HttpGet]
-        public IActionResult Get()
+        public ActionResult Get()
         {
             string cs = GetConnString();
 
-            using (var con = new SqlConnection(cs))
+            using (var con = new NpgsqlConnection(cs))
             {
                 con.Open();
 
-                string queryString = @"declare @result nvarchar(max);
-                                        set @result = (select u.id,
-                                               u.first_name,
-                                               u.mid_name,
-                                               u.last_name,
-                                               u.last_name + ' ' + u.first_name + ' ' + u.mid_name full_name,
-                                               town,
-                                               tech.id                                             id,
-                                               tech.name                                           name,
-                                               tech.description                                    description,
-                                               rating.id                                           id,
-                                               rating.rating_count                                 count,
-                                               rating.rating_value                                 value
-                                        from users u
-                                                 left join ratings rating on u.id = rating.user_id
-                                                 left join technology tech on rating.technology_id = tech.id FOR JSON AUTO)
-                                        select @result;";
+                string queryString = @"select json_agg(result)
+                                        from (select u.id,
+                                                     u.first_name,
+                                                     u.mid_name,
+                                                     u.last_name,
+                                                     u.last_name || ' ' || u.first_name || ' ' || u.mid_name                             full_name,
+                                                     town,
+                                                     (select json_agg(r1)
+                                                      from (select t.*,
+                                                                   (select json_agg(r2)
+                                                                    from (select id, rating_count as count, rating_value as value
+                                                                          from ratings rt
+                                                                          where rt.technology_id = t.id
+                                                                            and rt.user_id = u.id) r2) as rating
+                                                            from technology t
+                                                            where id in (select technology_id from ratings where user_id = u.id)) r1) as tech
+                                              from users u) result;";
 
-                SqlCommand cmd = new SqlCommand(queryString, con);
+                var cmd = new NpgsqlCommand(queryString, con);
 
                 try
                 {
@@ -109,35 +110,15 @@ namespace Ingos_API.Controllers
             var technologyId = (data["technologyId"]).ToString();
             var newRatingValue = (data["newRatingValue"]).ToString();
 
-            using (var con = new SqlConnection(cs))
+            using (var con = new NpgsqlConnection(cs))
             {
                 await con.OpenAsync();
-                string queryString = $@"declare @ratingId bigint;
-                                        declare @ratingValue int;
-                                        declare @ratingCount int;
+                string queryString = $@"select setrating(@userId, @technologyId, @newRatingValue);";
 
-                                        if EXISTS(select *
-                                                  from ratings
-                                                  where user_id = @userId
-                                                    and technology_id = @technologyId)
-                                            begin
-                                                set @ratingId = (select id from ratings where user_id = @userId and technology_id = @technologyId);
-                                                set @ratingValue = (select rating_value from ratings where user_id = @userId and technology_id = @technologyId);
-                                                set @ratingCount = (select rating_count from ratings where user_id = @userId and technology_id = @technologyId);
-
-                                                update ratings
-                                                set rating_count = @ratingCount + 1, rating_value = @ratingValue + @newRatingValue
-                                                where id = @ratingId;
-                                            end
-                                        else
-                                            begin
-                                                insert into ratings (user_id, technology_id, rating_count, rating_value)
-                                                values (@userId, @technologyId, 1, @newRatingValue)
-                                            end;";
-                SqlCommand cmd = new SqlCommand(queryString, con);
-                cmd.Parameters.AddWithValue("userId", userId);
-                cmd.Parameters.AddWithValue("technologyId", technologyId);
-                cmd.Parameters.AddWithValue("newRatingValue", newRatingValue);
+                var cmd = new NpgsqlCommand(queryString, con);
+                cmd.Parameters.AddWithValue("userId", int.Parse(userId));
+                cmd.Parameters.AddWithValue("technologyId", int.Parse(technologyId));
+                cmd.Parameters.AddWithValue("newRatingValue", int.Parse(newRatingValue));
 
                 try
                 {
@@ -165,19 +146,15 @@ namespace Ingos_API.Controllers
             var technologyId = (data["technologyId"]).ToString();
             var newRatingValue = (data["newRatingValue"]).ToString();
 
-            using (var con = new SqlConnection(cs))
+            using (var con = new NpgsqlConnection(cs))
             {
                 await con.OpenAsync();
-                string queryString = $@"if not exists(select * from ratings where user_id = @userId and technology_id = @technologyId)
-                                        begin
-                                            insert into ratings (user_id, technology_id, rating_count, rating_value) values (@userId, @technologyId, 1, @newRatingValue);
-                                        end
-                                    else raiserror ('Ошибка! Сотрудник уже имеет выбранную технологию.', 16, 16);";
+                string queryString = $@"select addrating(@userId, @technologyId, @newRatingValue);";
 
-                SqlCommand cmd = new SqlCommand(queryString, con);
-                cmd.Parameters.AddWithValue("userId", userId);
-                cmd.Parameters.AddWithValue("technologyId", technologyId);
-                cmd.Parameters.AddWithValue("newRatingValue", newRatingValue);
+                var cmd = new NpgsqlCommand(queryString, con);
+                cmd.Parameters.AddWithValue("userId", int.Parse(userId));
+                cmd.Parameters.AddWithValue("technologyId", int.Parse(technologyId));
+                cmd.Parameters.AddWithValue("newRatingValue", int.Parse(newRatingValue));
 
                 try
                 {
@@ -207,23 +184,12 @@ namespace Ingos_API.Controllers
             var email = (data["email"]).ToString();
             var password = (data["password"]).ToString();
 
-            using (var con = new SqlConnection(cs))
+            using (var con = new NpgsqlConnection(cs))
             {
                 con.Open();
-                string queryString = $@"declare @message varchar(100);
-                                        if not exists(select * from users where email = @email)
-                                            begin
-                                                insert into users (first_name, mid_name, last_name, town, email, password)
-                                                values (@first_name, @mid_name, @last_name, @town, @email, @password);
-                                                select * from users where email = @email for json auto;
-                                            end
-                                        else
-                                            begin
-                                                set @message = 'Email ' + @email + ' already exists';
-                                                raiserror (@message, 16, 16);
-                                            end;";
+                string queryString = $@"select registeruser(@first_name, @mid_name, @last_name, @town, @email, @password);";
 
-                SqlCommand cmd = new SqlCommand(queryString, con);
+                var cmd = new NpgsqlCommand(queryString, con);
                 cmd.Parameters.AddWithValue("first_name", first_name);
                 cmd.Parameters.AddWithValue("mid_name", mid_name);
                 cmd.Parameters.AddWithValue("last_name", last_name);
@@ -253,28 +219,12 @@ namespace Ingos_API.Controllers
             var email = (data["email"]).ToString();
             var password = (data["password"]).ToString();
 
-            using (var con = new SqlConnection(cs))
+            using (var con = new NpgsqlConnection(cs))
             {
                 con.Open();
-                string queryString = $@"declare @message varchar(100);
-                                        if exists(select * from users where email = @email and password = @password)
-                                            begin
-                                                select u.id,
-                                                       u.first_name,
-                                                       u.mid_name,
-                                                       u.last_name,
-                                                       u.last_name + ' ' + u.first_name + ' ' + u.mid_name full_name,
-                                                       u.town,
-                                                       u.email
-                                                from users u where email = @email for json auto;
-                                            end
-                                        else
-                                            begin
-                                                set @message = 'Error! Wrong email or password';
-                                                raiserror (@message, 16, 16);
-                                            end;";
+                string queryString = $@"select * from login(@email, @password);";
 
-                SqlCommand cmd = new SqlCommand(queryString, con);
+                var cmd = new NpgsqlCommand(queryString, con);
                 cmd.Parameters.AddWithValue("email", email);
                 cmd.Parameters.AddWithValue("password", password);
 
@@ -305,40 +255,13 @@ namespace Ingos_API.Controllers
             var email = (data["email"]).ToString();
             var password = (data["password"]).ToString();
 
-            using (var con = new SqlConnection(cs))
+            using (var con = new NpgsqlConnection(cs))
             {
                 con.Open();
-                string queryString = $@"declare @message varchar(100);
-                                        if exists(select * from users where id = @id)
-                                            begin
+                string queryString = $@"select updateuser(@id, @first_name, @mid_name, @last_name, @town, @email, @password);";
 
-                                                update users set
-                                                                 first_name = @first_name,
-                                                                 mid_name = @mid_name,
-                                                                 last_name = @last_name,
-                                                                 town = @town,
-                                                                 email = @email,
-                                                                 password = @password
-                                                where id = @id;
-
-                                                select u.id,
-                                                       u.first_name,
-                                                       u.mid_name,
-                                                       u.last_name,
-                                                       u.last_name + ' ' + u.first_name + ' ' + u.mid_name full_name,
-                                                       u.town,
-                                                       u.email
-                                                from users u where u.id = @id for json auto;
-
-                                            end
-                                        else
-                                            begin
-                                                set @message = 'Error! Not Found user with email ' + @email;
-                                                raiserror (@message, 16, 16);
-                                            end;";
-
-                SqlCommand cmd = new SqlCommand(queryString, con);
-                cmd.Parameters.AddWithValue("id", id);
+                var cmd = new NpgsqlCommand(queryString, con);
+                cmd.Parameters.AddWithValue("id", int.Parse(id));
                 cmd.Parameters.AddWithValue("first_name", first_name);
                 cmd.Parameters.AddWithValue("mid_name", mid_name);
                 cmd.Parameters.AddWithValue("last_name", last_name);
